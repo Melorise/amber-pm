@@ -19,8 +19,12 @@ is_nixos() {
 }
 
 APM_CONTAINER_PATH="/amber-ce-tools/bin-override:$PATH"
+APM_CONTAINER_XDG_DATA_DIRS="/amber-ce-tools/additional-data-dir-in-container:\$XDG_DATA_DIRS"
 if is_nixos; then
-    APM_CONTAINER_PATH="/amber-ce-tools/bin-override:/usr/local/bin:/usr/bin/"
+    APM_CONTAINER_PATH="/amber-ce-tools/bin-override:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    # Nix host data paths may be unavailable in the Debian container. Include
+    # its own MIME database and GSettings schemas before inherited host paths.
+    APM_CONTAINER_XDG_DATA_DIRS="/amber-ce-tools/additional-data-dir-in-container:/usr/local/share:/usr/share:\$XDG_DATA_DIRS"
 fi
 
 # if [ ! -e $chrootEnvPath/finish.flag ];then
@@ -106,7 +110,7 @@ ENV_VARS=(
     "PATH $APM_CONTAINER_PATH"
     "IS_ACE_ENV 1"
     "IS_APM_ENV 1"
-    "XDG_DATA_DIRS /amber-ce-tools/additional-data-dir-in-container:\$XDG_DATA_DIRS"
+    "XDG_DATA_DIRS $APM_CONTAINER_XDG_DATA_DIRS"
 )
 
 BIND_DIRS=(

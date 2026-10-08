@@ -8,17 +8,19 @@
 let
   cfg = config.programs.amber-pm;
   apmXdgDataDir = "/var/lib/apm/apm/files/ace-env/amber-ce-tools/data-dir";
+  apmFontconfig = pkgs.writeText "amber-pm-fonts.conf" ''
+    <?xml version="1.0"?>
+    <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+    <fontconfig>
+      <!-- Keep the container's own fonts and per-user font directories. -->
+      <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
 
-  aceRuntimePath = lib.makeBinPath (with pkgs; [
-    bash
-    bubblewrap
-    coreutils
-    gawk
-    gnugrep
-    gnused
-    gnutar
-    sudo
-  ]);
+      <!-- The host root is mounted at /host by every APM runner. -->
+      ${lib.concatMapStringsSep "\n" (
+        font: "      <dir>${lib.escapeXML "/host${font}"}</dir>"
+      ) config.fonts.packages}
+    </fontconfig>
+  '';
 in
 {
   options.programs.amber-pm = {
@@ -29,12 +31,14 @@ in
     initializeState = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Create /var/lib/apm/apm during system activation when it does not already exist.";
+      description = "Create /var/lib/apm/apm on first activation and refresh APM-managed files on later activations.";
     };
   };
 
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ cfg.package ];
+    # Generated from the final, merged NixOS fonts.packages value for this host.
+    environment.etc."amber-pm/fonts.conf".source = apmFontconfig;
     environment.sessionVariables.XDG_DATA_DIRS = lib.mkAfter [ apmXdgDataDir ];
     environment.etc."systemd/user-environment-generators/60-apm".source =
       pkgs.writeShellScript "60-apm" ''
@@ -54,30 +58,16 @@ in
     boot.kernel.sysctl."kernel.apparmor_restrict_unprivileged_userns" = lib.mkDefault 0;
 
     system.activationScripts.amber-pm-state = lib.mkIf cfg.initializeState ''
-      export PATH="${aceRuntimePath}:$PATH"
       target="/var/lib/apm/apm"
-      version_file="$target/.amber-pm-version"
-      current_version="${cfg.package.version}"
 
       if [ ! -e "$target" ]; then
         echo "APM state directory not found, initializing..."
         ${cfg.package}/bin/amber-pm-init-state
         echo "Running ace-init for first-time setup..."
-        /var/lib/apm/apm/files/bin/ace-init
-      elif [ -f "$version_file" ]; then
-        stored_version="$(cat "$version_file")"
-        if [ "$stored_version" != "$current_version" ]; then
-          echo "APM version changed ($stored_version -> $current_version), re-initializing..."
-          ${cfg.package}/bin/amber-pm-init-state --force
-          echo "Running ace-init..."
-          /var/lib/apm/apm/files/bin/ace-init
-        else
-          echo "APM version unchanged ($current_version), skipping ace-init."
-        fi
+        ${cfg.package}/bin/amber-pm-ace-init
       else
-        echo "No version file found, refreshing state and running ace-init..."
+        echo "Refreshing APM-managed files from the current Nix generation..."
         ${cfg.package}/bin/amber-pm-init-state --force
-        /var/lib/apm/apm/files/bin/ace-init
       fi
     '';
   };

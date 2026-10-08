@@ -1,5 +1,15 @@
 #!/bin/bash
 
+is_nixos() {
+    [ -r /etc/os-release ] && grep -Eq '^ID="?nixos"?$' /etc/os-release
+}
+
+if is_nixos; then
+    echo "检测到 NixOS，跳过向 /usr/share 和 /usr/local/share 写入桌面入口。"
+    echo "APM 桌面入口由 XDG_DATA_DIRS 暴露。"
+    exit 0
+fi
+
 # 检测是否安装了 KDE Plasma 桌面环境
 # 通过检查系统中是否存在相关的 desktop 文件或关键程序
 is_kde_plasma() {

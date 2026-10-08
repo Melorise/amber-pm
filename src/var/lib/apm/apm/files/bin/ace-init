@@ -20,13 +20,25 @@ is_nixos() {
 }
 
 APM_CONTAINER_PATH="/amber-ce-tools/bin-override:$PATH"
+APM_HOST_NIXOS=0
+APM_CONTAINER_INIT_ENV=()
+APM_LOCALE_GEN=(locale-gen)
 if is_nixos; then
-    APM_CONTAINER_PATH="/amber-ce-tools/bin-override:/usr/local/bin:/usr/bin/"
+    # The Debian container cannot use a Nix host's SHELL or locale tools.
+    # Keep upstream initialization semantics on other hosts.
+    APM_HOST_NIXOS=1
+    set -eo pipefail
+    APM_CONTAINER_PATH="/amber-ce-tools/bin-override:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    APM_CONTAINER_INIT_ENV=(--setenv SHELL /bin/bash --setenv APM_HOST_NIXOS 1)
+    APM_LOCALE_GEN=(bash -c 'if command -v locale-gen >/dev/null 2>&1; then locale-gen; fi')
 fi
 
 #if [ ! -e $chrootEnvPath ];then
 echo "Uncompress the env...."
 tar  -xvf $chrootEnvPath.tar.xz -C /var/lib/apm/$PKGNAME/files/
+if [ "$APM_HOST_NIXOS" = 1 ]; then
+    rm -f "$chrootEnvPath/finish.flag"
+fi
 #fi
 
 HERE="$(dirname $(realpath $0))"
@@ -51,6 +63,7 @@ function bookworm-run(){
 bwrap --dev-bind $chrootEnvPath/ / \
   --setenv PULSE_SERVER /run/user/$uid/pulse/native \
   --setenv PATH "$APM_CONTAINER_PATH" \
+  "${APM_CONTAINER_INIT_ENV[@]}" \
   --setenv IS_ACE_ENV "1" \
   --dev-bind-try /media /media \
   --dev-bind-try /tmp /tmp \
@@ -68,7 +81,7 @@ bwrap --dev-bind $chrootEnvPath/ / \
   --unshare-uts \
   --dev-bind-try /etc/resolv.conf /etc/resolv.conf \
   --dev-bind-try /home /home \
-  $@
+  "$@"
 
 
 }
@@ -89,16 +102,24 @@ export container_user_uid="$(sudo -u $non_root_user id -ru)"
 
 
 bookworm-run bash /amber-ce-tools/container-init/init.sh
-rm $chrootEnvPath/etc/localtime
+rm -f $chrootEnvPath/etc/localtime
 cp $(realpath /etc/localtime) $chrootEnvPath/etc/localtime
 chmod 777 $chrootEnvPath/etc/localtime 
-bookworm-run cp /host/etc/locale.gen /etc/locale.gen && locale-gen
-bookworm-run touch /finish.flag
+if [ "$APM_HOST_NIXOS" = 1 ]; then
+  if [ -f /etc/locale.gen ]; then
+    bookworm-run cp /host/etc/locale.gen /etc/locale.gen
+  fi
+  bookworm-run "${APM_LOCALE_GEN[@]}"
+else
+  bookworm-run cp /host/etc/locale.gen /etc/locale.gen && locale-gen
+  bookworm-run touch /finish.flag
+fi
 bookworm-run apt clean
 bookworm-run chown -R $(get_current_user)  /usr/lib/locale/
 sudo -u $(get_current_user) bwrap --dev-bind $chrootEnvPath/ / \
   --setenv PULSE_SERVER /run/user/$uid/pulse/native \
   --setenv PATH "$APM_CONTAINER_PATH" \
+  "${APM_CONTAINER_INIT_ENV[@]}" \
   --setenv IS_ACE_ENV "1" \
   --dev-bind $chrootEnvPath/ / \
   --dev-bind-try /media /media \
@@ -115,12 +136,16 @@ sudo -u $(get_current_user) bwrap --dev-bind $chrootEnvPath/ / \
   --bind-try /usr/share/fonts /usr/local/share/fonts  \
   --dev-bind-try /etc/resolv.conf /etc/resolv.conf \
   --dev-bind-try /home /home \
-  locale-gen
-bookworm-run update-locale LANG=$LANG
+  "${APM_LOCALE_GEN[@]}"
+if [ "$APM_HOST_NIXOS" = 1 ]; then
+  bookworm-run bash -c 'if command -v update-locale >/dev/null 2>&1; then update-locale LANG="${LANG:-C.UTF-8}"; else printf "LANG=%s\n" "${LANG:-C.UTF-8}" > /etc/default/locale; fi'
+else
+  bookworm-run update-locale LANG=$LANG
+fi
 chown -R root $chrootEnvPath
 mkdir -p $chrootEnvPath/amber-ce-tools/data-dir
-ln -sv ../../usr/share/applications $chrootEnvPath/amber-ce-tools/data-dir/
-ln -sv ../../usr/share/icons $chrootEnvPath/amber-ce-tools/data-dir/
+ln -sfnv ../../usr/share/applications $chrootEnvPath/amber-ce-tools/data-dir/applications
+ln -sfnv ../../usr/share/icons $chrootEnvPath/amber-ce-tools/data-dir/icons
 mkdir -p $chrootEnvPath/usr/share/templates  
 ln -sfv ../../usr/share/templates/   $chrootEnvPath/amber-ce-tools/data-dir/
 mkdir -p $chrootEnvPath/usr/share/mime
@@ -130,4 +155,6 @@ ln -sfv ../../usr/share/pixmaps/   $chrootEnvPath/amber-ce-tools/data-dir/
 
 chmod 777 -R $chrootEnvPath/usr/share/icons
 rm -vfr $chrootEnvPath/dev/*
-true
+if [ "$APM_HOST_NIXOS" = 1 ]; then
+    touch "$chrootEnvPath/finish.flag"
+fi

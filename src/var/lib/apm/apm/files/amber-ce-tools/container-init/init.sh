@@ -1,4 +1,9 @@
 #!/bin/bash 
+# Set by the host initializer, not the Debian container's /etc/os-release.
+if [ "${APM_HOST_NIXOS:-0}" = 1 ]; then
+        set -e
+fi
+
 if [ "$IS_ACE_ENV" != "1" ];then
 echo "ONLY RUN ME IN ACE"
 exit
@@ -8,6 +13,7 @@ fi
 
         printf "ACE: Setting up sudo...\n"
         mkdir -p /etc/sudoers.d
+        touch /etc/sudoers.d/sudoers
         # Do not check fqdn when doing sudo, it will not work anyways
         if ! grep -q 'Defaults !fqdn' /etc/sudoers.d/sudoers; then
                 printf "Defaults !fqdn\n" >> /etc/sudoers.d/sudoers
@@ -26,7 +32,7 @@ if ! grep -q "^${container_user_name}:" /etc/group; then
         if ! groupadd --force --gid "${container_user_gid}" "${container_user_name}"; then
                 # It may occur that we have users with unsupported user name (eg. on LDAP or AD)
                 # So let's try and force the group creation this way.
-                printf "%s:x:%s:" "${container_user_name}" "${container_user_gid}" >> /etc/group
+                printf "%s:x:%s:\n" "${container_user_name}" "${container_user_gid}" >> /etc/group
         fi
 fi
 
@@ -46,6 +52,7 @@ fi
 
 # If we have sudo/wheel groups, let's add the user to them.
 additional_groups=""
+container_shell="${SHELL:-/bin/bash}"
 if grep -q "^sudo" /etc/group; then
         additional_groups="sudo"
 elif grep -q "^wheel" /etc/group; then
@@ -63,18 +70,18 @@ if ! grep -q "^$(printf '%s' "${container_user_name}" | tr '\\' '.'):" /etc/pass
                 --home-dir "${container_user_home}" \
                 --no-create-home \
                 --groups "${additional_groups}" \
-                --shell "${SHELL:-"/bin/bash"}" \
+                --shell "${container_shell}" \
                 --uid "${container_user_uid}" \
                 --gid "${container_user_gid}" \
                 "${container_user_name}"; then
 
                 printf "Warning: there was a problem setting up the user\n"
                 printf "Warning: trying manual addition\n"
-                printf "%s:x:%s:%s:%s:%s:%s" \
+                printf "%s:x:%s:%s:%s:%s:%s\n" \
                         "${container_user_name}" "${container_user_uid}" \
                         "${container_user_gid}" "${container_user_name}" \
-                        "${container_user_home}" "${SHELL:-"/bin/bash"}" >> /etc/passwd
-                printf "%s::1::::::" "${container_user_name}" >> /etc/shadow
+                        "${container_user_home}" "${container_shell}" >> /etc/passwd
+                printf "%s::1::::::\n" "${container_user_name}" >> /etc/shadow
         fi
 # Ensure we're not using the specified SHELL. Run it only once, so that future
 # user's preferences are not overwritten at each start.
@@ -91,7 +98,7 @@ elif [ ! -e /etc/passwd.done ]; then
 
         if ! usermod \
                 --home "${container_user_home}" \
-                --shell "${SHELL:-"/bin/bash"}" \
+                --shell "${container_shell}" \
                 --groups "${additional_groups}" \
                 --uid "${container_user_uid}" \
                 --gid "${container_user_gid}" \
@@ -100,6 +107,9 @@ elif [ ! -e /etc/passwd.done ]; then
 
                 printf "Warning: there was a problem setting up the user\n"
         fi
+        touch /etc/passwd.done
+fi
+if [ "${APM_HOST_NIXOS:-0}" = 1 ] && [ ! -e /etc/passwd.done ]; then
         touch /etc/passwd.done
 fi
 
@@ -116,7 +126,7 @@ mkdir -p /usr/share/icons
 mkdir -p /usr/share/themes
 
 ## init host-spawn
-unlink /amber-ce-tools/bin-override/host-spawn
+rm -f /amber-ce-tools/bin-override/host-spawn
 ln -sfv /amber-ce-tools/bin-override/host-spawn-$(uname -m) /amber-ce-tools/bin-override/host-spawn
 
 
@@ -124,6 +134,3 @@ ln -sfv /amber-ce-tools/bin-override/host-spawn-$(uname -m) /amber-ce-tools/bin-
 
 
 exit 0
-
-
-

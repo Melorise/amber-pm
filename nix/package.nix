@@ -25,11 +25,12 @@
   util-linux,
   which,
   xdg-user-dirs,
+  xsettingsd,
   xz,
   zenity,
   version ? "1.3.4.0",
   sourceRoot ? ../.,
-  src ? lib.cleanSourceWith {
+  source ? lib.cleanSourceWith {
     src = sourceRoot;
     filter =
       path: type:
@@ -41,7 +42,10 @@
         "result"
       ];
   },
-}:
+  # Accept explicit src overrides without callPackage auto-injecting pkgs.src,
+  # an unrelated package name in nixpkgs. source remains an alias.
+  ...
+}@args:
 
 let
   runtimePath = lib.makeBinPath [
@@ -68,6 +72,7 @@ let
     util-linux
     which
     xdg-user-dirs
+    xsettingsd
     xz
     zenity
   ];
@@ -76,7 +81,7 @@ stdenvNoCC.mkDerivation {
   pname = "amber-pm";
   inherit version;
 
-  inherit src;
+  src = if args ? src then args.src else source;
 
   nativeBuildInputs = [ makeWrapper ];
 
@@ -147,6 +152,14 @@ stdenvNoCC.mkDerivation {
     makeWrapper "$out/usr/libexec/apm/apm-main" "$out/bin/apm" \
       --prefix PATH : "$out/bin:${runtimePath}"
 
+    cat > "$out/bin/amber-pm-ace-init" <<EOF
+#!${bash}/bin/bash
+set -euo pipefail
+export PATH="${runtimePath}:\$PATH"
+exec /var/lib/apm/apm/files/bin/ace-init "\$@"
+EOF
+    chmod +x "$out/bin/amber-pm-ace-init"
+
     cat > "$out/bin/amber-pm-init-state" <<'EOF'
 #!@bash@/bin/bash
 set -euo pipefail
@@ -164,6 +177,7 @@ fi
 
 seed="@out@/share/amber-pm/var-lib-apm/apm"
 target="/var/lib/apm/apm"
+container_tools="$target/files/ace-env/amber-ce-tools"
 
 mkdir -p /var/lib/apm
 if [ -e "$target" ] && [ "''${1:-}" != "--force" ]; then
@@ -174,10 +188,22 @@ fi
 
 mkdir -p "$target"
 cp -a "$seed"/. "$target"/
+
+# ace-init copies these tools into the persistent Debian environment.  Refresh
+# that copy as well so it cannot retain interpreter paths from an old Nix
+# generation.  Keep the rest of ace-env, including installed packages, intact.
+if [ -d "$target/files/ace-env" ]; then
+  mkdir -p "$container_tools"
+  cp -a "$seed/files/amber-ce-tools"/. "$container_tools"/
+  chmod -R u+rwX "$container_tools"
+fi
+
 echo '@version@' > "$target/.amber-pm-version"
-chmod -R u+rwX "$target"
+# Do not traverse the potentially large persistent Debian environment on every
+# system activation.  Only make the seed-managed files writable here.
+find "$target" -path "$target/files/ace-env" -prune -o -exec chmod u+rwX {} +
 echo "Initialized $target"
-echo "Next step: run '/var/lib/apm/apm/files/bin/ace-init' as root, or run 'apm --help' for CLI smoke testing."
+echo "Next step: run '@out@/bin/amber-pm-ace-init' as root, or run 'apm --help' for CLI smoke testing."
 EOF
     substituteInPlace "$out/bin/amber-pm-init-state" \
       --replace-fail '@bash@' '${bash}' \

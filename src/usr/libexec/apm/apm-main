@@ -9,6 +9,96 @@ log.error()  { echo -e "[\e[31mERROR\e[0m]: \e[1m$*\e[0m"; }
 log.info() { echo -e "[\e[96mINFO\e[0m]:  \e[1m$*\e[0m"; }
 log.debug()  { echo -e "[\e[32mDEBUG\e[0m]: \e[1m$*\e[0m"; }
 
+is_nixos() {
+    [ -f /etc/os-release ] && grep -Eq '^ID="?nixos"?$' /etc/os-release
+}
+
+configure_host_fontconfig() {
+    local host_fontconfig_file
+
+    is_nixos || return 0
+    # Respect application-specific or user-provided fontconfig overrides.
+    [ -z "${FONTCONFIG_FILE:-}" ] || return 0
+    [ -e /etc/amber-pm/fonts.conf ] || return 0
+    host_fontconfig_file="$(readlink -f /etc/amber-pm/fonts.conf)"
+    [ -n "$host_fontconfig_file" ] || return 0
+
+    # Every application runner mounts the host root at /host.
+    export FONTCONFIG_FILE="/host${host_fontconfig_file}"
+}
+
+append_cursor_path() {
+    local path="$1"
+
+    [ -n "$path" ] || return 0
+    case ":${APM_CURSOR_PATHS:-}:" in
+        *":${path}:"*) ;;
+        *) APM_CURSOR_PATHS="${APM_CURSOR_PATHS:+${APM_CURSOR_PATHS}:}${path}" ;;
+    esac
+}
+
+configure_host_cursor() {
+    local cursor_search_path root marker resolved theme_dir icon_root
+    local xsettings cursor_theme cursor_size
+
+    is_nixos || return 0
+    APM_CURSOR_PATHS=""
+    cursor_search_path="${XCURSOR_PATH:-}"
+    # Keep explicit paths (including paths already meaningful in the container)
+    # in their original order; add resolved host paths rather than replacing them.
+    while IFS= read -r root; do
+        append_cursor_path "$root"
+    done < <(printf '%s\n' "$cursor_search_path" | tr ':' '\n')
+    cursor_search_path="${cursor_search_path}:${HOME}/.icons:${HOME}/.local/share/icons"
+    cursor_search_path="${cursor_search_path}:${HOME}/.nix-profile/share/icons"
+    cursor_search_path="${cursor_search_path}:/etc/profiles/per-user/${USER}/share/icons"
+    cursor_search_path="${cursor_search_path}:/run/current-system/sw/share/icons"
+
+    # Resolve host-side symlinks before entering the container. A path such as
+    # /run/current-system/sw/share/icons is otherwise broken inside bwrap,
+    # because its absolute symlink targets point at the container's /nix.
+    while IFS= read -r root; do
+        [ -d "$root" ] || continue
+
+        while IFS= read -r -d '' marker; do
+            resolved="$(readlink -f -- "$marker")"
+            [ -n "$resolved" ] || continue
+
+            theme_dir="$(dirname -- "$resolved")"
+            icon_root="$(dirname -- "$theme_dir")"
+            append_cursor_path "/host${icon_root}"
+        done < <(
+            find -L "$root" -mindepth 2 -maxdepth 2 \
+                \( -type d -name cursors -o -type f -name index.theme \) \
+                -print0 2>/dev/null
+        )
+    done < <(printf '%s' "$cursor_search_path" | tr ':' '\n')
+
+    append_cursor_path "/usr/local/share/icons"
+    append_cursor_path "/usr/share/icons"
+    append_cursor_path "/usr/share/cursors"
+    export XCURSOR_PATH="$APM_CURSOR_PATHS"
+
+    # XSettings is shared by X11/XWayland sessions and is independent of the
+    # desktop environment. Explicit environment overrides retain precedence.
+    xsettings="$(dump_xsettings 2>/dev/null || true)"
+    if [ -z "${XCURSOR_THEME:-}" ]; then
+        cursor_theme="$(
+            printf '%s\n' "$xsettings" \
+                | awk '$1 == "Gtk/CursorThemeName" { sub(/^[^ ]+[[:space:]]+"/, ""); sub(/"$/, ""); print; exit }'
+        )"
+        [ -n "$cursor_theme" ] && export XCURSOR_THEME="$cursor_theme"
+    fi
+
+    if [ -z "${XCURSOR_SIZE:-}" ]; then
+        cursor_size="$(
+            printf '%s\n' "$xsettings" \
+                | awk '$1 == "Gtk/CursorThemeSize" && $2 ~ /^[0-9]+$/ { print $2; exit }'
+        )"
+        [ -n "$cursor_size" ] && export XCURSOR_SIZE="$cursor_size"
+    fi
+}
+
 # 帮助信息函数
 show_help() {
     cat <<EOF
@@ -306,6 +396,8 @@ apm_exec(){
     # ===============================
     # 执行
     # ===============================
+    configure_host_fontconfig
+    configure_host_cursor
     chrootEnvPath="/tmp/apm/${coredir}" "${APM_RUN_EXEC}" "$@"
 
     # ===============================
