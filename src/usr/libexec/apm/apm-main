@@ -187,6 +187,65 @@ apm_exec(){
     local current_dir="${PATH_PREFIX}/var/lib/apm/${coredir}"
     local next_info_file=""
     local APM_RUN_EXEC=/var/lib/apm/apm/files/ace-run
+    local mount_dir="/tmp/apm/${coredir}"
+    local overlay_mounted=0
+    local cleanup_done=0
+
+    _unmount_mountpoint() {
+        local path="$1"
+        local attempt
+
+        for attempt in 1 2 3 4 5 6 7 8; do
+            mountpoint -q "$path" || return 0
+
+            if command -v fusermount3 >/dev/null 2>&1; then
+                fusermount3 -u "$path" 2>/dev/null || true
+            fi
+            if mountpoint -q "$path"; then
+                umount "$path" 2>/dev/null || true
+            fi
+            if mountpoint -q "$path"; then
+                if command -v fusermount3 >/dev/null 2>&1; then
+                    fusermount3 -uz "$path" 2>/dev/null || true
+                else
+                    umount -l "$path" 2>/dev/null || true
+                fi
+            fi
+        done
+
+        ! mountpoint -q "$path"
+    }
+
+    _cleanup_mount() {
+        local status="${1:-$?}"
+
+        if [ "$cleanup_done" = 1 ]; then
+            return "$status"
+        fi
+        cleanup_done=1
+        trap - EXIT HUP INT TERM
+
+        if [ "$overlay_mounted" = 1 ] && mountpoint -q "$mount_dir"; then
+            if ! _unmount_mountpoint "$mount_dir"; then
+                log.warn "Unable to unmount APM overlay: $mount_dir"
+            fi
+        fi
+
+        return "$status"
+    }
+
+    _handle_mount_signal() {
+        local signal="$1"
+        local status
+
+        case "$signal" in
+            HUP) status=129 ;;
+            INT) status=130 ;;
+            TERM) status=143 ;;
+        esac
+        _cleanup_mount "$status"
+        exit "$status"
+    }
 
     # ===============================
     # 辅助函数：解析并添加某个包的 addons
@@ -352,7 +411,14 @@ apm_exec(){
     local lowerdir
     lowerdir=$(IFS=:; echo "${lowerdirs[*]}")
 
-    mkdir -p "/tmp/apm/${coredir}"
+    if mountpoint -q "$mount_dir"; then
+        log.warn "Found an existing APM overlay, trying to unmount it: $mount_dir"
+        if ! _unmount_mountpoint "$mount_dir"; then
+            log.error "Unable to clear existing APM overlay: $mount_dir"
+            return 1
+        fi
+    fi
+    mkdir -p "$mount_dir"
 
     # ===============================
     # 应用 info_env（从下到上）
@@ -389,21 +455,32 @@ apm_exec(){
     log.debug "Mounting overlayfs"
     log.debug "lowerdir=$lowerdir"
 
-    fuse-overlayfs \
+    trap '_cleanup_mount "$?"' EXIT
+    trap '_handle_mount_signal HUP' HUP
+    trap '_handle_mount_signal INT' INT
+    trap '_handle_mount_signal TERM' TERM
+    overlay_mounted=1
+    if ! fuse-overlayfs \
         -o lowerdir="$lowerdir",upperdir="${PATH_PREFIX}/var/lib/apm/${coredir}/files/core/",workdir="${PATH_PREFIX}/var/lib/apm/${coredir}/files/work/" \
-        "/tmp/apm/${coredir}"
+        "$mount_dir"; then
+        _cleanup_mount 1
+        log.error "Unable to mount APM overlay: $mount_dir"
+        return 1
+    fi
 
     # ===============================
     # 执行
     # ===============================
     configure_host_fontconfig
     configure_host_cursor
-    chrootEnvPath="/tmp/apm/${coredir}" "${APM_RUN_EXEC}" "$@"
+    local run_status=0
+    chrootEnvPath="$mount_dir" "${APM_RUN_EXEC}" "$@" || run_status=$?
 
     # ===============================
     # 卸载
     # ===============================
-    umount "/tmp/apm/${coredir}"
+    _cleanup_mount "$run_status"
+    return "$run_status"
 }
 
 # 启动应用：通过 amber-pm-app-launcher 运行
